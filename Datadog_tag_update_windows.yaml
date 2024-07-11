@@ -1,0 +1,96 @@
+---
+- name: Datadog Agent troubleshooting
+  hosts: "{{ ansible_limit if ansible_limit not in ['none', 'all'] else 'invalid' }}"
+  gather_facts: yes
+  become: false
+  vars:
+    datadog_yaml_filepath: "C:\\ProgramData\\Datadog\\datadog.yaml"
+    desired_env: "prod"
+  tasks:
+
+    - name: Find Datadog Agent executable
+      win_find:
+        paths: C:\Program Files\Datadog\Datadog Agent\bin
+        patterns: "agent.exe"
+      register: agent_exe_files
+
+    - name: Output of Datadog Agent exe
+      debug:
+        msg: "Datadog Agent is {{ 'installed' if agent_exe_files.matched else 'not installed please install and continue' }}"
+
+    - name: Check if the Datadog.yaml file exists
+      win_find:
+        paths: "{{ datadog_yaml_filepath | dirname }}"
+        patterns: "{{ datadog_yaml_filepath | basename }}"
+      register: datadog_yaml_stats
+
+    - name: Output of datadog.yaml
+      debug:
+        msg: "datadog.yaml file {{ 'found' if datadog_yaml_stats.matched else 'not found. Please provide the correct path or create datadog.yaml file' }}."
+        
+    - name: Read current environment from Datadog configuration
+      win_shell: type "{{ datadog_yaml_filepath }}" | findstr /i "env:"
+      register: current_env_command
+      changed_when: false
+
+    - name: Parse current environment from the output
+      set_fact:
+        current_env: "{{ current_env_command.stdout | regex_replace('env:\\s*(\\w+)', '\\1') | trim }}"
+      when: current_env_command.stdout | regex_search('env:\\s*\\w+')
+
+    - name: Fail if current environment matches desired environment
+      ansible.builtin.fail:
+        msg: "Desired environment '{{ desired_env }}' already set in Datadog configuration."
+      when: current_env == desired_env
+
+    - name: Update Datadog configuration with desired environment
+      win_lineinfile:
+        path: "{{ datadog_yaml_filepath }}"
+        regexp: '^\s*env:\s*(\w+)\s*$'
+        line: "env: {{ desired_env }}"
+      when: current_env != desired_env or current_env_command.stdout is not defined
+
+    - name: Handle case when Datadog configuration doesn't exist
+      debug:
+        msg: "Datadog configuration file does not exist or is invalid."
+      when: current_env_command.stdout is not defined
+
+    - name: Create Datadog configuration file with desired environment
+      win_shell: "echo 'env: {{ desired_env }}' > '{{ datadog_yaml_filepath }}'"
+      when: current_env_command.stdout is not defined
+
+    - name: Get datadog.yaml file without the api key
+      win_shell: type "{{ datadog_yaml_filepath }}" | findstr /V /C:"api_key"
+      register: datadogyaml
+      when: datadog_yaml_stats.matched
+
+    - debug:
+        msg: "{{ datadogyaml.stdout }}"
+      when: datadog_yaml_stats.matched
+
+    - name: Get datadog Service Status
+      win_service:
+        name: DatadogAgent
+      register: datadog_agent_service_status
+
+    - debug:
+       msg: "Datadog Agent Service Status - {{ datadog_agent_service_status.state }}"
+
+    - name: Restart Datadog Agent Service
+      win_service:
+        name: DatadogAgent
+        state: restarted
+      when: current_env != desired_env or current_env_command is not defined
+
+    - name: Pause for 30 seconds to make sure agent is up
+      pause:
+        seconds: 30
+      when: datadog_agent_service_status.state != 'running'
+
+    - name: Get datadog Service Status
+      win_service:
+        name: "DatadogAgent"
+      register: datadog_agent_service_status
+
+    - debug:
+       msg: "Datadog Agent service status - {{ datadog_agent_service_status.state }}"
